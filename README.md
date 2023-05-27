@@ -2,9 +2,8 @@ GithubReleaseHelper is a [PleaL](https://github.com/MisterNoNameLP/PleaL) script
 It is capable of attach files from multiple folders to the realease.
 
 # Instalation
-
 Install the depencies.
-get the `createRelease.sh` file.
+Get the `createRelease.sh` file.
 
 # Depencies
 ### Interpreter

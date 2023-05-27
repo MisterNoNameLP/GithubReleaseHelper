@@ -1,5 +1,5 @@
 #!/usr/bin/pleal
-local version = "1"
+local version = "1.0.1"
 local name = "GithubReleaseHelper"
 
 --===== conf =====--
@@ -41,8 +41,7 @@ do --arg parsing
 		os.exit(0)
 	end)
 
-	parser:flag("--dry", "Dry run"):target("dry")
-	parser:option("--log-level", "Set the log level"):default(0):target("logLevel")
+	parser:option("--log-level", "Set the log level (0-2)"):default(0):target("logLevel")
 
 	args = parser:parse()
 
