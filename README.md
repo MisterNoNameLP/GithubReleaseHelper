@@ -10,7 +10,7 @@ Get the `createRelease.sh` file.
 [PleaL](https://github.com/MisterNoNameLP/PleaL)
 
 ### Luarocks
-LuaFileSystem  
+luafilesystem  
 argparse  
 http  
 
