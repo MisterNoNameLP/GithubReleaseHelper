@@ -17,13 +17,11 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ]]
 
-local version = "1.1"
+local version = "1.1.1"
 local name = "GithubReleaseHelper"
 
 --===== conf =====--
---[[
-	default configuration. args with the same meaning have higher priority.
-]]
+-- default configuration. args with the same meaning have higher priority.
 local url = "" --repo URL/releases
 local releaseFiles = {} --a list of individual files and fiolder to attach to the realease
 local releaseFolders = {} --folder in wich files and folders are store to be release seperately
