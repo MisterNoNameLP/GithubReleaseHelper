@@ -17,13 +17,17 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ]]
 
-local version = "1.0.1"
+local version = "1.1"
 local name = "GithubReleaseHelper"
 
 --===== conf =====--
-local url = "https://api.github.com/repos/OpenPlayVerse/test/releases" --repo URL/releases
-local releaseFolders = {} --overwritten by the -R argument
-local tokenPath = "ghAPI.token" --path to file containing the bearer token
+--[[
+	default configuration. args with the same meaning have higher priority.
+]]
+local url = "" --repo URL/releases
+local releaseFiles = {} --a list of individual files and fiolder to attach to the realease
+local releaseFolders = {} --folder in wich files and folders are store to be release seperately
+local tokenPath = "" --path to file containing the bearer token 
 local tmpReleaseFileLocation = ".compressedReleaseFiles.zip" --relative to the releaseFolders if starting with a dot. its recommended to have this on a ramfs
 
 --===== runtime vars =====--
@@ -35,7 +39,7 @@ local len = require("utf8").len
 local lfs = require("lfs")
 
 local args
-local token = ut.readFile("ghAPI.token")
+local token = ut.readFile(tokenPath)
 local uploadUrl
 local uploadedFiles = {}
 
@@ -43,6 +47,7 @@ local uploadedFiles = {}
 do --arg parsing 
 	local parser = argparse(name)
 
+	parser:option("-u --url --upstream", "The github upsream url"):action(function(_, _, arg) url = arg end)
 	parser:option("-t --tag", "Release tag"):count(1):args(1):target("tag")
 	parser:option("-n --name", "Relase name"):count(1):args(1):target("name")
 	parser:option("-d --description", "Relase description"):count(1):args(1):target("description")
@@ -52,19 +57,32 @@ do --arg parsing
 	parser:flag("-P --prerelease", "Prerelease"):target("prerelease")
 	parser:flag("-G --generate-release-notes", "Generate release notes"):target("notes")
 
-	parser:option("-R --release-folders", "Folder in wich release files are stored"):count("*"):target("releaseFolders")
+	parser:option("--token", "The path to a file containing the authentification token"):action(function(_, _, arg) 
+		if lfs.attributes(arg) then
+			token = ut.readFile(arg)
+		else
+			print("ERROR: Token not found")
+			os.exit()
+		end
+	end)
+	parser:option("-r --release-file", "Single folder/file to attach to the release"):count("*"):target("releaseFiles")
+	parser:option("-R --release-folder", "Folder in wich release folder/files are stored and release seperately"):count("*"):target("releaseFolders")
+	parser:option("--compression-path", "The path where compressed release folder are temporarly stored"):action(function(_, _, arg) tmpReleaseFileLocation = arg end)
 
+	parser:option("--log-level", "Set the log level (0-2)"):default(0):target("logLevel")
+	parser:flag("--dump-auth-token", "Does not censore the authentification token on log-level 2"):target("noAuthCensor")
 	parser:flag("-v --version", "log version and exit"):action(function() 
 		log("$name: v$version")
 		os.exit(0)
 	end)
 
-	parser:option("--log-level", "Set the log level (0-2)"):default(0):target("logLevel")
-
 	args = parser:parse()
 
 	if #args.releaseFolders > 0 then
 		releaseFolders = args.releaseFolders
+	end
+	if #args.releaseFiles > 0 then
+		releaseFiles = args.releaseFiles
 	end
 end
 
@@ -95,7 +113,7 @@ local function sendRequest(url, headers, body)
 		end
 	end
 	for i, v in pairs(headers) do
-		if i:lower() ~= "auth" and i:lower() ~= "authorization" then
+		if i:lower() ~= "auth" and i:lower() ~= "authorization" or args.noAuthCensor then
 			verboseLog(2, "Add header: $i, $v")
 		else
 			verboseLog(2, "Add header (Censored): $i, TOKEN")
@@ -133,6 +151,7 @@ local function uploadFile(path, name, fileType)
 	local headers
 	local fileHandler = io.open(path, "r")
 
+	ending = ut.parseArgs(ending, "")
 	if ending == ".gz" then
 		ending = "gzip"
 	end
@@ -148,9 +167,35 @@ local function uploadFile(path, name, fileType)
 	responseHeaders, responseTable = sendRequest("${uploadUrl}?name=${file}${ending}", headers, fileHandler:read("*a"))
 	fileHandler:close()
 end
+local function processFile(path)
+	log("Process file: $path")
+	local fileType = lfs.attributes(path).mode
+	local dirName
+	local path, file, ending = ut.seperatePath(path)
+	file = file .. ut.parseArgs(ending, "")
+	if fileType == "directory" then
+		dirName = file
+		file = "${file}.zip"
+	end
+	if not uploadedFiles[file] then
+		if fileType == "directory" then
+			local currentWorkingDir = lfs.currentdir()
+			log("Zip dir: $path/$dirName")
+			lfs.chdir(path)
+			os.execute("zip -r $tmpReleaseFileLocation $dirName")
+			uploadFile("$tmpReleaseFileLocation", "${dirName}.zip", fileType)
+			os.execute("rm $tmpReleaseFileLocation")
+			lfs.chdir(currentWorkingDir)
+		else
+			uploadFile("$path/$file", file, fileType)
+		end
+		uploadedFiles[file] = true
+	else
+		log("Skipping $fileType: $path/$file: file already uploaded")
+	end
+end
 local function collectReleaseFiles(path, fileType)
 	log("Prepare ${fileType}s from: $path")
-	local dirName
 	if not lfs.attributes("$path") then
 		log("ERROR: Release folder not found: $path")
 		return false
@@ -158,26 +203,7 @@ local function collectReleaseFiles(path, fileType)
 	for file in lfs.dir(path) do
 		if file:sub(1, 1) ~= "." then
 			if lfs.attributes("$path/$file").mode == fileType then
-				if fileType == "directory" then
-					dirName = file
-					file = "${file}.zip"
-				end
-				if not uploadedFiles[file] then
-					if fileType == "directory" then
-						local currentWorkingDir = lfs.currentdir()
-						log("Zip dir: $path/$dirName")
-						lfs.chdir(path)
-						os.execute("zip -r $tmpReleaseFileLocation $dirName")
-						uploadFile("$tmpReleaseFileLocation", "${dirName}.zip", fileType)
-						os.execute("rm $tmpReleaseFileLocation")
-						lfs.chdir(currentWorkingDir)
-					else
-						uploadFile("$path/$file", file, fileType)
-					end
-					uploadedFiles[file] = true
-				else
-					log("Skipping $fileType: $path/$file: file already uploaded")
-				end
+				processFile("$path/$file")
 			end
 		end
 	end
@@ -217,6 +243,13 @@ end
 
 --=== collect/upload release files ===--
 log("Prepare release folders")
+for _, file in pairs(releaseFiles) do
+	if not lfs.attributes(file) then
+		log("ERROR: Release file not found: $file")
+	else
+		processFile(file)
+	end
+end
 for _, dir in pairs(releaseFolders) do
 	log("Process release folder: $dir")
 	if collectReleaseFiles(dir, "file") then
