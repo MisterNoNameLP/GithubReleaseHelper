@@ -17,7 +17,7 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ]]
 
-local version = "1.1.1"
+local version = "1.2"
 local name = "GithubReleaseHelper"
 
 --===== conf =====--
@@ -67,7 +67,7 @@ do --arg parsing
 	parser:option("-R --release-folder", "Folder in wich release folder/files are stored and release seperately"):count("*"):target("releaseFolders")
 	parser:option("--compression-path", "The path where compressed release folder are temporarly stored"):action(function(_, _, arg) tmpReleaseFileLocation = arg end)
 
-	parser:option("--log-level", "Set the log level (0-2)"):default(0):target("logLevel")
+	parser:option("--log-level", "Set the log level (0-4)"):default(0):target("logLevel")
 	parser:flag("--dump-auth-token", "Does not censore the authentification token on log-level 2"):target("noAuthCensor")
 	parser:flag("-v --version", "log version and exit"):action(function() 
 		log("$name: v$version")
@@ -89,7 +89,7 @@ local function log(...)
 	io.write("[" .. tostring(os.date("%X")) .. "]: ")
 	print(...)
 end
-local function verboseLog(level, ...)
+local function verbose(level, ...)
 	if tonumber(args.logLevel) >= level then
 		io.write("[" .. tostring(os.date("%X")) .. "][$level]: ")
 		print(...)
@@ -97,13 +97,11 @@ local function verboseLog(level, ...)
 end
 
 local function sendRequest(url, headers, body)
-	log("Send API request to: $url")
-
+	verbose(2, "Send API request to: $url")
 	local request = http.new_from_uri(url)
 	local responseHeaders, responseStatus, responseBody, responseError
 	local stream
 
-	verboseLog(1, "Build headers")
 	do --make all upsert names lowercase
 		local orgHeaderUpsert = request.headers.upsert
 		request.headers.upsert = function(self, name, value)
@@ -112,17 +110,14 @@ local function sendRequest(url, headers, body)
 	end
 	for i, v in pairs(headers) do
 		if i:lower() ~= "auth" and i:lower() ~= "authorization" or args.noAuthCensor then
-			verboseLog(2, "Add header: $i, $v")
+			verbose(3, "Add header: $i, $v")
 		else
-			verboseLog(2, "Add header (Censored): $i, TOKEN")
+			verbose(3, "Add header (Censored): $i, TOKEN")
 		end
 		request.headers:upsert(i, v)
 	end
-	verboseLog(1, "Add body")
-	verboseLog(2, "Body: $body")
+	verbose(4, "Body: $body")
 	request:set_body(body)
-	verboseLog(1, "Send request")
-	verboseLog(1, "Process response")
 	responseHeaders, stream = request:go()
 	if responseHeaders == nil then
 		io.stderr:write(tostring(stream))
@@ -143,18 +138,28 @@ local function sendRequest(url, headers, body)
 end
 
 local function uploadFile(path, name, fileType)
-	log("Upload $fileType: $path")
+	if fileType == "directory" then
+		log("Upload $fileType: ${select(2, ut.seperatePath(name))}")
+	else
+		log("Upload $fileType: $name")
+	end
 	local _, file, ending = ut.seperatePath(name)
 	local responseHeaders, responseTable
 	local headers
 	local fileHandler = io.open(path, "r")
+	local fileContent = fileHandler:read("*a")
+	fileHandler:close()
+
+	if #fileContent == 0 then
+		log("WARN: Skipping empty file: $path")
+		return false
+	end
 
 	ending = ut.parseArgs(ending, "")
 	if ending == ".gz" then
 		ending = "gzip"
 	end
 	
-	verboseLog(1, "Build release file request")
 	headers = {
 		[":method"] = "POST",
 		["X-GitHub-Api-Version"] = "2022-11-28",
@@ -162,14 +167,13 @@ local function uploadFile(path, name, fileType)
 		["Authorization"] = "Bearer $token",
 		["content-type"] = "application/$ending"
 	}
-	responseHeaders, responseTable = sendRequest("${uploadUrl}?name=${file}${ending}", headers, fileHandler:read("*a"))
-	fileHandler:close()
+	responseHeaders, responseTable = sendRequest("${uploadUrl}?name=${file}${ending}", headers, fileContent)
 end
-local function processFile(path)
-	log("Process file: $path")
-	local fileType = lfs.attributes(path).mode
+local function processFile(pathArg)
+	local fileType = lfs.attributes(pathArg).mode
 	local dirName
-	local path, file, ending = ut.seperatePath(path)
+	local path, file, ending = ut.seperatePath(pathArg)
+
 	file = file .. ut.parseArgs(ending, "")
 	if fileType == "directory" then
 		dirName = file
@@ -178,22 +182,30 @@ local function processFile(path)
 	if not uploadedFiles[file] then
 		if fileType == "directory" then
 			local currentWorkingDir = lfs.currentdir()
-			log("Zip dir: $path/$dirName")
+			log("Zip directory: $path/$dirName")
 			lfs.chdir(path)
 			os.execute("zip -r $tmpReleaseFileLocation $dirName")
 			uploadFile("$tmpReleaseFileLocation", "${dirName}.zip", fileType)
 			os.execute("rm $tmpReleaseFileLocation")
 			lfs.chdir(currentWorkingDir)
 		else
-			uploadFile("$path/$file", file, fileType)
+			local uploadPath = "$path/$file"
+			if #path == 0 then
+				uploadPath = uploadPath:sub(2)
+			end
+			uploadFile(uploadPath, file, fileType)
 		end
 		uploadedFiles[file] = true
 	else
-		log("Skipping $fileType: $path/$file: file already uploaded")
+		if fileType == "directory" then
+			log("WARN: Skipping $fileType: ${select(2, ut.seperatePath(path .. '/' .. file))}: file or folder with same name already uploaded")
+		else
+			log("WARN: Skipping $fileType: $path/$file: file already uploaded")
+		end
 	end
 end
 local function collectReleaseFiles(path, fileType)
-	log("Prepare ${fileType}s from: $path")
+	log("Collect ${fileType}s in: $path")
 	if not lfs.attributes("$path") then
 		log("ERROR: Release folder not found: $path")
 		return false
@@ -212,15 +224,12 @@ end
 --=== create release ===--
 do
 	local responseHeaders, responseTable
-	log("Build release creation request")
 	local headers = {
 		[":method"] = "POST",
 		["X-GitHub-Api-Version"] = "2022-11-28",
 		["Accept"] = "json",
 		["Authorization"] = "Bearer $token",
 	}
-	log("Build body")
-
 	local requestTable = {
 		tag_name = args.tag,
 		name = args.name,
@@ -231,6 +240,7 @@ do
 		prerelease = args.prerelease,
 		generate_release_notes = args.notes
 	}
+	log("Send release creation request")
 	responseHeaders, responseTable = sendRequest(url, headers, json.encode(requestTable))
 	uploadUrl = responseTable.upload_url
 	do --cut uploadUrl
@@ -240,16 +250,17 @@ do
 end
 
 --=== collect/upload release files ===--
-log("Prepare release folders")
+verbose(1, "Process releaseFiles")
 for _, file in pairs(releaseFiles) do
+	verbose(1, "Release: $file")
 	if not lfs.attributes(file) then
 		log("ERROR: Release file not found: $file")
 	else
 		processFile(file)
 	end
 end
+verbose(1, "Process releaseFolders")
 for _, dir in pairs(releaseFolders) do
-	log("Process release folder: $dir")
 	if collectReleaseFiles(dir, "file") then
 		collectReleaseFiles(dir, "directory")
 	end
